@@ -2470,40 +2470,84 @@ var loadState = /*#__PURE__*/function () {
   };
 }();
 
-// Salva estado: cache local imediato + Supabase com throttle de 60s (só admin escreve)
-// Estratégia: cache local é instantâneo (UX rápida). Supabase sincroniza no MÁXIMO uma
-// vez por minuto — evita escrita excessiva enquanto o admin digita placares em série.
-// O estado mais recente sempre é o que vai pro Supabase (sobrescreve _pendingState).
+// Salva estado no Supabase com throttle de 60s.
+// Estratégia:
+//  - Admin: autoridade total — salva o estado completo (placares, config, bettors).
+//  - Apostador: salva APENAS suas próprias predictions, fazendo merge com o estado remoto
+//    pra não sobrescrever placares/config/palpites de outros.
+//  - Viewer puro: não escreve nada.
 var _saveTimer = null;
 var _pendingState = null;
 var _onSyncStatusChange = null;
 // Flag pra evitar loop de feedback: realtime → setState → useEffect → saveState → ...
-// Quando subscribeToChanges aplica um estado remoto, marca true. O saveState ignora.
 var _isApplyingRemote = false;
+// Referências globais atualizadas pelo App via useEffect — necessárias pra flushSave
+// saber qual papel/bettor é o usuário atual no momento do flush.
+var _myBettorIdGlobal = null;
+var _isBettorGlobal = false;
 var SYNC_INTERVAL_MS = 60000; // 1 minuto
 
 var _flushSave = /*#__PURE__*/function () {
   var _ref5 = _asyncToGenerator(function* () {
     _saveTimer = null;
-    if (!_pendingState || !IS_ADMIN || !sb) return;
+    if (!_pendingState || !sb) return;
+    if (!IS_ADMIN && !_isBettorGlobal) return; // viewer puro não escreve
+
     var stateToSave = _pendingState;
     _pendingState = null;
     if (_onSyncStatusChange) _onSyncStatusChange('syncing');
     try {
-      var _yield$sb$from$upsert = yield sb.from('bolao_state').upsert({
-          id: ROW_ID,
-          state: stateToSave,
-          updated_at: new Date().toISOString()
-        }, {
-          onConflict: 'id'
-        }),
-        error = _yield$sb$from$upsert.error;
-      if (error) throw error;
+      if (IS_ADMIN) {
+        // Admin tem autoridade total — escreve estado completo
+        var _yield$sb$from$upsert = yield sb.from('bolao_state').upsert({
+            id: ROW_ID,
+            state: stateToSave,
+            updated_at: new Date().toISOString()
+          }, {
+            onConflict: 'id'
+          }),
+          error = _yield$sb$from$upsert.error;
+        if (error) throw error;
+      } else {
+        var _stateToSave$bettors;
+        // Bettor: re-busca estado remoto e mescla SÓ suas próprias predictions
+        // Isso evita sobrescrever placares/config/palpites de outros bettors
+        var _yield$sb$from$select2 = yield sb.from('bolao_state').select('state').eq('id', ROW_ID).maybeSingle(),
+          data = _yield$sb$from$select2.data,
+          _error = _yield$sb$from$select2.error;
+        if (_error) throw _error;
+        var remoteState = data !== null && data !== void 0 && data.state && Object.keys(data.state).length > 0 ? data.state : stateToSave;
+        var myId = _myBettorIdGlobal;
+        var myLocal = (_stateToSave$bettors = stateToSave.bettors) === null || _stateToSave$bettors === void 0 ? void 0 : _stateToSave$bettors.find(b => b.id === myId);
+        if (!myId || !myLocal) {
+          // Sem identificação — não escreve
+          if (_onSyncStatusChange) _onSyncStatusChange('synced');
+          return;
+        }
+        var mergedState = _objectSpread(_objectSpread({}, remoteState), {}, {
+          bettors: (remoteState.bettors || []).map(b => b.id === myId ? _objectSpread(_objectSpread({}, b), {}, {
+            predictions: myLocal.predictions || {}
+          }) : b)
+        });
+        // Se meu bettor não está no remoto (caso raro: foi removido pelo admin), aborta
+        if (!mergedState.bettors.find(b => b.id === myId)) {
+          if (_onSyncStatusChange) _onSyncStatusChange('error');
+          return;
+        }
+        var _yield$sb$from$upsert2 = yield sb.from('bolao_state').upsert({
+            id: ROW_ID,
+            state: mergedState,
+            updated_at: new Date().toISOString()
+          }, {
+            onConflict: 'id'
+          }),
+          e2 = _yield$sb$from$upsert2.error;
+        if (e2) throw e2;
+      }
       if (_onSyncStatusChange) _onSyncStatusChange('synced');
     } catch (e) {
       console.error('Supabase save falhou:', e.message);
       if (_onSyncStatusChange) _onSyncStatusChange('error');
-      // Re-agenda em 10s pra tentar de novo
       _pendingState = stateToSave;
       _saveTimer = setTimeout(_flushSave, 10000);
     }
@@ -2513,22 +2557,15 @@ var _flushSave = /*#__PURE__*/function () {
   };
 }();
 var saveState = state => {
-  // Cache local imediato (todos)
+  // Cache local imediato (todos, inclusive viewer puro — pra ter cache offline)
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   } catch (_) {}
+  if (!sb) return;
+  if (!IS_ADMIN && !_isBettorGlobal) return; // viewer puro: só cache local
 
-  // Só admin escreve no Supabase
-  if (!IS_ADMIN || !sb) return;
-
-  // Sempre atualiza o "estado-alvo" pro mais recente
   _pendingState = state;
-
-  // Marca como pendente no UI
   if (_onSyncStatusChange) _onSyncStatusChange('pending');
-
-  // Throttle: se já tem timer agendado, deixa rolar. Não reseta (diferente de debounce).
-  // Isso garante que A CADA MINUTO no máximo, o estado mais recente vai pro Supabase.
   if (_saveTimer) return;
   _saveTimer = setTimeout(_flushSave, SYNC_INTERVAL_MS);
 };
@@ -4519,14 +4556,14 @@ var JoinScreen = _ref30 => {
       // Esta é uma escrita autorizada porque o RLS é aberto pra inserts/updates.
       try {
         if (sb) {
-          var _yield$sb$from$upsert2 = yield sb.from('bolao_state').upsert({
+          var _yield$sb$from$upsert3 = yield sb.from('bolao_state').upsert({
               id: ROW_ID,
               state: nextState,
               updated_at: new Date().toISOString()
             }, {
               onConflict: 'id'
             }),
-            err = _yield$sb$from$upsert2.error;
+            err = _yield$sb$from$upsert3.error;
           if (err) throw err;
         }
         try {
@@ -4673,9 +4710,27 @@ function App() {
     // 2. Subscribe pra atualizações em tempo real do Supabase
     var unsubscribe = subscribeToChanges(remoteState => {
       if (cancelled) return;
-      // Marca antes do setState pra que o useEffect saiba que veio do remoto
-      // (e não dispare saveState — isso causaria loop)
       _isApplyingRemote = true;
+
+      // Caso especial: se bettor tem palpites locais NÃO SALVOS (_pendingState existe),
+      // preserva os palpites locais do próprio bettor — não deixa o realtime sobrescrever
+      // edição em vôo que ainda não chegou no banco
+      if (IS_BETTOR && _myBettorIdGlobal && _pendingState) {
+        var _pendingState$bettors;
+        var myLocalBettor = (_pendingState$bettors = _pendingState.bettors) === null || _pendingState$bettors === void 0 ? void 0 : _pendingState$bettors.find(b => b.id === _myBettorIdGlobal);
+        if (myLocalBettor) {
+          var mergedRemote = _objectSpread(_objectSpread({}, remoteState), {}, {
+            bettors: (remoteState.bettors || []).map(b => b.id === _myBettorIdGlobal ? _objectSpread(_objectSpread({}, b), {}, {
+              predictions: myLocalBettor.predictions || {}
+            }) : b)
+          });
+          setState(mergeState(mergedRemote));
+          try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(mergedRemote));
+          } catch (_) {}
+          return;
+        }
+      }
       setState(mergeState(remoteState));
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(remoteState));
@@ -4688,14 +4743,13 @@ function App() {
     };
   }, []);
 
-  // Aviso ao fechar aba se houver alterações pendentes (só admin)
+  // Aviso ao fechar aba se houver alterações pendentes (admin ou bettor)
   useEffect(() => {
-    if (!IS_ADMIN) return;
+    if (!IS_ADMIN && !IS_BETTOR) return;
     var handler = e => {
       if (_pendingState) {
-        // Tenta forçar salvamento (sem garantia de chegar)
         forceSave();
-        var msg = 'Há alterações ainda não sincronizadas com os apostadores. Aguarde alguns segundos antes de fechar.';
+        var msg = 'Há alterações ainda não sincronizadas. Aguarde alguns segundos antes de fechar.';
         e.preventDefault();
         e.returnValue = msg;
         return msg;
@@ -4738,6 +4792,12 @@ function App() {
     if (!IS_ADMIN && !IS_BETTOR) return;
     setState(updater);
   }, [IS_BETTOR]);
+
+  // Sincroniza refs globais usadas pelo saveState/flushSave (módulo)
+  useEffect(() => {
+    _myBettorIdGlobal = MY_BETTOR_ID;
+    _isBettorGlobal = IS_BETTOR;
+  }, [MY_BETTOR_ID, IS_BETTOR]);
 
   // Tabs visíveis variam por papel
   var ALL_TABS = [{
@@ -4854,7 +4914,7 @@ function App() {
     className: "text-amber-400 ml-1.5"
   }, "DA COPA"))), /*#__PURE__*/React.createElement("div", {
     className: "flex items-center gap-3"
-  }, IS_ADMIN && /*#__PURE__*/React.createElement("div", {
+  }, (IS_ADMIN || IS_BETTOR) && /*#__PURE__*/React.createElement("div", {
     className: "hidden md:flex items-center gap-2 text-[10px] font-mono uppercase tracking-wider"
   }, /*#__PURE__*/React.createElement("span", {
     className: cls('w-1.5 h-1.5 rounded-full', syncStatus === 'syncing' && 'bg-amber-400 animate-pulse', syncStatus === 'pending' && 'bg-amber-400', syncStatus === 'synced' && 'bg-emerald-500', syncStatus === 'error' && 'bg-red-500', syncStatus === 'idle' && 'bg-neutral-600')
