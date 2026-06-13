@@ -4737,15 +4737,26 @@ function App() {
       if (!cancelled) setSyncStatus(s);
     };
 
-    // Função helper pra mergear estado salvo com defaults
+    // Função helper pra mergear estado salvo com defaults.
+    // IMPORTANTE: groupGames e knockoutGames (datas, horários, locais) SEMPRE vêm
+    // do código atual — preservamos só o `result` (placar lançado) do salvo.
+    // Isso garante que atualizações no calendário propagam para todos sem precisar
+    // de reset/migração manual.
+    var mergeGames = (sourceGames, savedGames) => sourceGames.map(g => {
+      var sg = savedGames === null || savedGames === void 0 ? void 0 : savedGames.find(x => x.id === g.id);
+      return sg && sg.result ? _objectSpread(_objectSpread({}, g), {}, {
+        result: sg.result
+      }) : g;
+    });
     var mergeState = saved => {
-      var _saved$config, _saved$knockoutGames;
+      var _saved$config;
       return _objectSpread(_objectSpread(_objectSpread({}, DEFAULT_STATE), saved), {}, {
         config: _objectSpread(_objectSpread(_objectSpread({}, DEFAULT_STATE.config), saved.config), {}, {
           scoring: _objectSpread(_objectSpread({}, DEFAULT_STATE.config.scoring), ((_saved$config = saved.config) === null || _saved$config === void 0 ? void 0 : _saved$config.scoring) || {})
         }),
         teams: _objectSpread(_objectSpread({}, DEFAULT_STATE.teams), saved.teams),
-        knockoutGames: ((_saved$knockoutGames = saved.knockoutGames) === null || _saved$knockoutGames === void 0 ? void 0 : _saved$knockoutGames.length) === ALL_KNOCKOUT_GAMES.length ? saved.knockoutGames : ALL_KNOCKOUT_GAMES
+        groupGames: mergeGames(DEFAULT_STATE.groupGames, saved.groupGames),
+        knockoutGames: mergeGames(ALL_KNOCKOUT_GAMES, saved.knockoutGames)
       });
     };
 
