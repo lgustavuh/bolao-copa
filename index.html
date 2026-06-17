@@ -808,7 +808,7 @@ var GROUP_SCHEDULE_2026 = [
   id: 'G20',
   group: 'J',
   round: 1,
-  date: '2026-06-18',
+  date: '2026-06-17',
   time: '01:00',
   venue: 'San Francisco',
   home: 'J3',
@@ -4146,17 +4146,19 @@ var PredictionsTab = _ref24 => {
     if (!IS_ADMIN && !isBettor) return;
     if (isBettor && activeBettor !== myBettorId) return;
 
-    // Jogo encerrado (placar lançado) - bloqueia
-    var groupGame = state.groupGames.find(g => g.id === gameId);
-    var koGame = state.knockoutGames.find(g => g.id === gameId);
-    var realGame = groupGame || koGame;
-    var real = realGame === null || realGame === void 0 ? void 0 : realGame.result;
-    if (real && real.home !== null && real.home !== undefined && real.away !== null && real.away !== undefined) {
-      return;
+    // Travas de tempo e placar só se aplicam ao bettor.
+    // Admin tem autoridade pra corrigir palpites em qualquer estado do jogo
+    // (ex: apostador relatar que digitou errado, admin precisa ajustar manualmente).
+    if (!IS_ADMIN) {
+      var groupGame = state.groupGames.find(g => g.id === gameId);
+      var koGame = state.knockoutGames.find(g => g.id === gameId);
+      var realGame = groupGame || koGame;
+      var real = realGame === null || realGame === void 0 ? void 0 : realGame.result;
+      if (real && real.home !== null && real.home !== undefined && real.away !== null && real.away !== undefined) {
+        return;
+      }
+      if (realGame && isGameLocked(realGame)) return;
     }
-
-    // Jogo travado (menos de 1h até começar) - bloqueia (admin também respeita)
-    if (realGame && isGameLocked(realGame)) return;
     setState(s => _objectSpread(_objectSpread({}, s), {}, {
       bettors: s.bettors.map(b => {
         if (b.id !== activeBettor) return b;
@@ -4286,7 +4288,7 @@ var PredictionsTab = _ref24 => {
     var timeLocked = !hasResult && isGameLocked(g);
     var canEdit = IS_ADMIN || isBettor && activeBettor === myBettorId;
     var canView = canViewPalpite(g);
-    var locked = hasResult || timeLocked || !ready || !canEdit;
+    var locked = !canEdit || !ready || !IS_ADMIN && (hasResult || timeLocked);
     return /*#__PURE__*/React.createElement("div", {
       key: g.id,
       className: cls('border bg-neutral-900/40 px-4 py-3 rounded-sm', !ready && 'opacity-50', hasResult && 'opacity-70', timeLocked && !hasResult && 'border-amber-500/20', !timeLocked && !hasResult && 'border-neutral-800', timeLocked && hasResult && 'border-neutral-800')
@@ -4357,7 +4359,9 @@ var PredictionRow = _ref25 => {
     canView = _ref25$canView === void 0 ? true : _ref25$canView;
   var hasResult = game.result && game.result.home !== null && game.result.home !== undefined && game.result.away !== null && game.result.away !== undefined;
   var timeLocked = !hasResult && isGameLocked(game);
-  var locked = hasResult || timeLocked || !canEdit;
+  // Admin pode editar mesmo em jogos encerrados/travados (corrigir erros).
+  // Bettor respeita travas.
+  var locked = !canEdit || !IS_ADMIN && (hasResult || timeLocked);
 
   // Componente que renderiza um valor de palpite ou um cadeado se não pode ver
   var MaskedScore = _ref26 => {
